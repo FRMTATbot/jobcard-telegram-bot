@@ -1,72 +1,75 @@
-import os
 from flask import Flask, request
 import telegram
-from datetime import datetime, timedelta
 import threading
+import time
 
-# Set your Bot Token and Group Chat ID
-BOT_TOKEN = "8124226038:AAEo8iGZujc7MQiGn2-Uz2w--Y4VH6orkiA"
-GROUP_CHAT_ID = -1002343871318
+# Replace these with your actual values
+TOKEN = "8124226038:AAEo8iGZujc7MQiGn2-Uz2w--Y4VH6orkiA"
+CHAT_ID = -1002343871318
 
-bot = telegram.Bot(token=BOT_TOKEN)
+bot = telegram.Bot(token=TOKEN)
 app = Flask(__name__)
 
-# In-memory storage for jobcards
-jobcards = {}
+jobcards = {}  # Dictionary to track active jobcards
 
-def send_reminders(vehicle_number):
-    job = jobcards.get(vehicle_number)
-    if not job or job["closed"]:
-        return
+def send_reminder(vehicle, deadline, grace=3):
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        if vehicle not in jobcards:
+            return
+        time.sleep(60)  # Check every 1 minute
+    for i in range(grace):
+        if vehicle not in jobcards:
+            return
+        bot.send_message(chat_id=CHAT_ID, text=f"⏰ Reminder: Jobcard {vehicle} has exceeded the deadline!")
+        time.sleep(3600)  # Wait 1 hour
 
-    deadline = job["deadline"]
-    now = datetime.now()
-
-    alerts = [
-        (deadline - timedelta(minutes=30), f"⏳ 30 mins left for {vehicle_number} deadline."),
-        (deadline - timedelta(minutes=15), f"⚠️ 15 mins left for {vehicle_number} deadline."),
-        (deadline, f"⛔ Time's up for {vehicle_number}"),
-    ]
-
-    for alert_time, message in alerts:
-        delay = (alert_time - now).total_seconds()
-        if delay > 0:
-            threading.Timer(delay, lambda: bot.send_message(chat_id=GROUP_CHAT_ID, text=message)).start()
-
-    # Hourly reminders for 3 hours after deadline
-    for i in range(1, 4):
-        reminder_time = deadline + timedelta(hours=i)
-        delay = (reminder_time - now).total_seconds()
-        if delay > 0:
-            threading.Timer(delay, lambda: check_and_remind(vehicle_number)).start()
-
-def check_and_remind(vehicle_number):
-    if vehicle_number in jobcards and not jobcards[vehicle_number]["closed"]:
-        bot.send_message(chat_id=GROUP_CHAT_ID, text=f"🔁 {vehicle_number} still not closed. Follow up needed.")
-
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+@app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    update = telegram.Update.de_json(request.get_json(force=True), bot)
-    
-    if update.message and update.message.chat.id == GROUP_CHAT_ID:
-        text = update.message.text.strip()
-        parts = text.split()
+    data = request.get_json()
 
-        if len(parts) >= 2 and parts[0].lower() == "jc":
-            vehicle_number = parts[1].upper()
+    if "message" in data:
+        msg = data["message"]
+        chat_id = msg["chat"]["id"]
+        text = msg.get("text", "")
 
-            if len(parts) == 2:
-                # Start a new jobcard
-                deadline = datetime.now() + timedelta(hours=1)
-                jobcards[vehicle_number] = {"start": datetime.now(), "deadline": deadline, "closed": False}
-                bot.send_message(chat_id=GROUP_CHAT_ID, text=f"✅ Jobcard {vehicle_number} started. Deadline in 1 hour.")
-                send_reminders(vehicle_number)
+        if not text.startswith("JC "):
+            return "ok"
 
-            elif len(parts) == 3 and parts[2].lower() == "close":
-                if vehicle_number in jobcards and not jobcards[vehicle_number]["closed"]:
-                    jobcards[vehicle_number]["closed"] = True
-                    bot.send_message(chat_id=GROUP_CHAT_ID, text=f"🛑 Jobcard {vehicle_number} closed.")
-                else:
-                    bot.send_message(chat_id=GROUP_CHAT_ID, text=f"⚠️ Jobcard {vehicle_number} was not active or already closed.")
+        parts = text.strip().split()
+        if len(parts) < 2:
+            return "ok"
 
-    return "OK"
+        vehicle = parts[1].upper()
+        command = parts[2].lower() if len(parts) > 2 else "start"
+
+        if command == "start":
+            jobcards[vehicle] = time.time() + 3600  # 1 hour deadline
+            bot.send_message(chat_id=chat_id, text=f"✅ Jobcard {vehicle} has been STARTED.")
+            threading.Thread(target=send_reminder, args=(vehicle, jobcards[vehicle])).start()
+
+        elif command == "close":
+            if vehicle in jobcards:
+                del jobcards[vehicle]
+                bot.send_message(chat_id=chat_id, text=f"✅ Jobcard {vehicle} has been CLOSED.")
+            else:
+                bot.send_message(chat_id=chat_id, text=f"⚠️ Jobcard {vehicle} not found.")
+
+        elif command.isdigit():
+            extra_minutes = int(command)
+            if vehicle in jobcards:
+                jobcards[vehicle] += extra_minutes * 60
+                bot.send_message(chat_id=chat_id, text=f"🔄 Jobcard {vehicle} extended by {extra_minutes} minutes.")
+            else:
+                bot.send_message(chat_id=chat_id, text=f"⚠️ Jobcard {vehicle} not found.")
+
+    return "ok"
+
+@app.route("/")
+def index():
+    return "Bot is running."
+
+if __name__ == "__main__":
+    app.run(port=5000)
